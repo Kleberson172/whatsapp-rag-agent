@@ -1,164 +1,271 @@
-# Agente RAG de Atendimento 24/7 via WhatsApp — MVP (ELEVEN)
+# Agente RAG de Atendimento — Perfumaria Essência (ELEVEN)
 
-MVP de agente de atendimento ao cliente com RAG (Retrieval-Augmented Generation),
-integrado ao WhatsApp via Twilio, usando Claude para geração de respostas e
-Postgres + pgvector como base de conhecimento pesquisável.
+Status atual: **núcleo do agente 100% funcional e testado**. A integração
+com o canal WhatsApp está em andamento (ver seção "Próximos passos").
 
-Exemplo de domínio: **loja de perfume**. Troque o conteúdo em `src/seed.js`
-pelos dados reais do cliente antes da demo.
+Este documento descreve como o projeto está estruturado até agora, como
+foi montado, e como testar o que já funciona.
+
+---
+
+## O que já está funcionando
+
+- ✅ Banco de dados com busca vetorial (Neon Postgres + pgvector)
+- ✅ Geração de embeddings da base de conhecimento (Voyage AI)
+- ✅ Geração de respostas em linguagem natural (Google Gemini)
+- ✅ Busca contextual (RAG): o agente só responde com base no que está
+  cadastrado na base de conhecimento, sem inventar informação
+- ✅ Memória de conversa por número de telefone (contexto entre mensagens)
+- ✅ Lógica de escalação para atendente humano (por palavra-chave ou baixa
+  confiança na resposta)
+- ✅ Tom de voz humanizado e ajustado para soar natural no WhatsApp
+- ✅ Testado via terminal com múltiplos cenários (preço, promoção, política
+  de troca, pergunta fora do escopo, pedido de atendente humano)
+
+## O que ainda falta
+
+- 🔧 Conectar o agente a um canal real de WhatsApp (em andamento)
+
+---
 
 ## Arquitetura
 
 ```
-Cliente (WhatsApp)
-      │
-      ▼
-Twilio (gateway WhatsApp)
-      │  webhook POST
-      ▼
-Express (src/index.js)
-      │
-      ├─► Busca vetorial na base de conhecimento (pgvector)  [src/rag.js]
-      ├─► Histórico recente da conversa (Postgres)
-      └─► Claude (Anthropic API) gera a resposta
-      │
-      ▼
-Resposta enviada de volta via Twilio → WhatsApp do cliente
+Pergunta do cliente (texto)
+        │
+        ▼
+Busca vetorial na base de conhecimento (Neon + pgvector)
+        │  encontra os trechos mais relevantes (produtos, políticas, FAQ...)
+        ▼
+Monta o prompt: instruções + contexto encontrado + histórico da conversa
+        │
+        ▼
+Google Gemini gera a resposta em linguagem natural
+        │
+        ▼
+Regras de negócio verificam se precisa escalar para humano
+        │
+        ▼
+Resposta final + registro da conversa no banco
 ```
 
-## Pré-requisitos
+## Estrutura do projeto
 
-1. **PostgreSQL** com a extensão `pgvector` disponível (local, Docker, ou um
-   serviço gerenciado tipo Neon/Supabase — ambos já suportam pgvector).
-2. Conta na **Anthropic** (chave de API) — https://console.anthropic.com
-3. Conta na **Voyage AI** (embeddings, tem free tier) — https://www.voyageai.com
-4. Conta de desenvolvedor na **Meta** (developers.facebook.com) com um app
-   do tipo WhatsApp Business configurado — é grátis, mas exige verificação
-   da empresa no Business Manager antes de sair do modo de teste.
-   *(Alternativa mais rápida pra testar: Twilio WhatsApp Sandbox — grátis,
-   mas cobra taxa por mensagem depois que for pra produção. Veja a seção
-   "Usando Twilio em vez da Meta" mais abaixo.)*
+```
+whatsapp-rag-agent/
+├── src/
+│   ├── db.js            → conexão com Postgres + criação das tabelas
+│   ├── embeddings.js     → geração de embeddings via Voyage AI
+│   ├── llm.js            → geração de respostas (Gemini por padrão)
+│   ├── rag.js            → núcleo do agente: busca + prompt + escalação
+│   ├── seed.js           → popula a base de conhecimento (dados de exemplo)
+│   ├── migrate.js        → cria as tabelas no banco (roda separado)
+│   └── index.js          → servidor Express (usado na integração WhatsApp)
+├── .env                  → chaves de API e configurações (não commitar)
+├── .env.example          → modelo do .env
+└── package.json
+```
 
-## Por que Meta Cloud API em vez de Twilio?
+## Banco de dados (tabelas)
 
-O Twilio é um intermediário: ele repassa a tarifa da Meta e ainda cobra a
-taxa dele por cima (a partir de $0,005 por mensagem). Indo direto pela Meta
-Cloud API, você paga só o que a própria Meta cobra — e como o agente responde
-de forma livre (não usa templates), essas são "conversas de serviço", que são
-gratuitas. Ou seja: **WhatsApp Business API em si sai de graça** no seu caso
-de uso; o único custo real recorrente vira o Claude API (uso da IA) + a
-hospedagem do servidor.
+- **`knowledge_chunks`** — a base de conhecimento em si. Cada linha é um
+  "pedaço" de informação (um produto, uma política, uma pergunta de FAQ)
+  com seu respectivo embedding (vetor) pra busca por similaridade.
+- **`conversations`** — histórico de mensagens por número de telefone,
+  usado como memória de curto prazo (últimas 8 mensagens).
+- **`escalations`** — registro de quando e por que uma conversa foi
+  escalada para atendimento humano.
 
-## Configurando a Meta WhatsApp Cloud API
+## Como a base de conhecimento é alimentada
 
-1. Vá em https://developers.facebook.com/apps e crie um novo app do tipo
-   **"Business"**.
-2. Adicione o produto **WhatsApp** ao app.
-3. Na aba **API Setup**, você verá um número de teste temporário já pronto
-   pra usar (grátis), um `Phone Number ID` e um `Temporary Access Token`.
-   Copie os dois para `META_PHONE_NUMBER_ID` e `META_ACCESS_TOKEN` no `.env`.
-   *(O token temporário expira em 24h — quando for pra produção de verdade,
-   gere um token permanente vinculado a um System User, nas configurações
-   do Business Manager.)*
-4. Em `META_VERIFY_TOKEN`, invente uma senha qualquer (ex: `eleven-2026`) —
-   é só um segredo que você define, usado no próximo passo.
-5. Suba o servidor (`npm run dev`) e exponha-o publicamente com
-   `npx localtunnel --port 3000` (ou ngrok).
-6. De volta no painel da Meta, em **WhatsApp > Configuration > Webhook**,
-   clique em "Edit", cole a URL pública + `/webhook/whatsapp`, e no campo
-   "Verify token" cole a mesma senha que você colocou em `META_VERIFY_TOKEN`.
-   Clique em "Verify and save" — se aparecer sucesso, o webhook está ativo.
-7. Ainda na mesma tela, marque a inscrição no campo **"messages"** — é isso
-   que garante que as mensagens dos clientes cheguem no seu webhook.
-8. No painel de API Setup, adicione seu próprio número de WhatsApp como
-   "destinatário de teste" (números de teste só podem falar com números
-   pré-autorizados até você sair do modo de desenvolvimento).
-9. Mande uma mensagem do seu WhatsApp pro número de teste da Meta. Pronto,
-   já está conversando com o agente de verdade, sem gastar nada com Twilio.
+Hoje, o arquivo `src/seed.js` contém os dados de exemplo (fictícios) de
+uma perfumaria: produtos com preço, uma promoção, política de troca,
+formas de pagamento, horário de funcionamento e dicas de recomendação.
 
-## Setup
+Cada item tem uma `category` (`produto`, `politica`, `faq`, `promocao`),
+um `title` e um `content`. Ao rodar `npm run seed`, cada item é convertido
+em um embedding (vetor numérico) pela Voyage AI e salvo no banco.
 
-```bash
-# 1. Instalar dependências
+**Para usar com dados reais de um cliente**: basta editar o array
+`knowledgeBase` dentro de `src/seed.js` com as informações reais (produtos,
+preços, políticas da empresa) e rodar `npm run seed` de novo. Não precisa
+mexer em nenhum outro arquivo do projeto.
+
+## Geração de respostas (LLM)
+
+Por padrão, o agente usa o **Google Gemini** (`gemini-3.6-flash`), que é
+gratuito e não pede cartão de crédito. Isso é controlado pela variável
+`LLM_PROVIDER=gemini` no `.env`.
+
+O arquivo `src/llm.js` também tem suporte pronto para usar o **Claude
+(Anthropic)** no lugar do Gemini, caso no futuro haja créditos disponíveis
+(ex: programa de estudante) — basta mudar `LLM_PROVIDER=anthropic` no `.env`.
+
+## Tom de voz e regras do agente
+
+O prompt do agente (dentro de `buildSystemPrompt()` em `src/rag.js`) foi
+ajustado, depois de vários testes, para:
+
+- Responder de forma curta, calorosa e natural, como um funcionário de
+  verdade da loja falaria no WhatsApp — não como um script robótico
+- Usar negrito no formato do WhatsApp (`*texto*`, um asterisco), não
+  Markdown tradicional (`**texto**`)
+- Nunca mencionar "sistema" ou "base de dados" ao responder — se não sabe
+  algo, responde direto e natural ("aqui a gente só trabalha com X")
+- Nunca inventar preços, políticas ou informações que não estejam na base
+- Escalar para atendente humano quando: o cliente pede explicitamente, usa
+  palavras de frustração, ou quando a base de conhecimento não tem
+  informação suficiente (confiança da busca abaixo de um limite)
+- Ser honesto (sem soar como aviso legal) se o cliente perguntar
+  diretamente se está falando com um robô ou assistente virtual
+
+## Como testar (sem WhatsApp, direto no terminal)
+
+Com o `.env` configurado e a base de conhecimento populada (`npm run seed`),
+dá pra testar o agente diretamente, simulando uma conversa:
+
+```powershell
+node -e "import('./src/rag.js').then(m => m.handleIncomingMessage('teste-123', 'Qual o preço do Essência Noir?').then(r => console.log(r.replyText)))"
+```
+
+Trocando o texto da pergunta e mantendo o mesmo identificador (`teste-123`)
+entre chamadas, dá pra testar também a memória de conversa (perguntas de
+seguimento tipo "e esse tem desconto?").
+
+### Cenários já testados e validados
+
+| Cenário | Resultado |
+|---|---|
+| Pergunta de preço com promoção ativa | Respondeu certo e calculou o desconto |
+| Política de troca | Respondeu completo, sem escalar à toa |
+| Pergunta fora da base (ex: produto que não vendem) | Foi honesto, sem inventar, sugeriu alternativa |
+| Pedido explícito de atendente humano | Escalou corretamente |
+
+## Setup local (resumo)
+
+1. `npm install`
+2. Copiar `.env.example` para `.env` e preencher:
+   - `DATABASE_URL` (Neon Postgres)
+   - `VOYAGE_API_KEY` (Voyage AI, grátis)
+   - `GEMINI_API_KEY` (Google AI Studio, grátis)
+3. `npm run migrate` — cria as tabelas
+4. `npm run seed` — popula a base de conhecimento
+5. Testar via terminal (comando acima) ou seguir para a integração com
+   WhatsApp (próxima etapa, ainda em configuração)
+
+---
+
+## Rodando pela primeira vez em outro computador
+
+Guia completo para quem nunca configurou o projeto antes (ex: um colega
+recebendo a pasta do projeto pela primeira vez).
+
+### 1. Instalar os programas necessários
+
+Antes de tocar no projeto, instale nessa ordem:
+
+- **Node.js** (versão 20 ou superior) — baixe em [nodejs.org](https://nodejs.org)
+  e instale normalmente (Next, Next, Finish). Isso já inclui o `npm`.
+  Para confirmar que instalou certo, abra o terminal e rode:
+  ```powershell
+  node -v
+  npm -v
+  ```
+  Deve mostrar um número de versão em cada um, sem erro.
+
+- **Visual Studio Code** (editor de código) — baixe em
+  [code.visualstudio.com](https://code.visualstudio.com). Não é
+  obrigatório, mas facilita muito editar arquivos e usar o terminal
+  integrado.
+
+- **Git** (opcional, só se for clonar de um repositório em vez de copiar
+  a pasta) — baixe em [git-scm.com](https://git-scm.com).
+
+### 2. Copiar o projeto
+
+Se o projeto foi enviado como uma pasta ou arquivo `.zip`, extraia essa
+pasta em qualquer lugar do computador (ex: `Área de Trabalho` ou
+`Documentos`). Se for por Git, clone o repositório normalmente.
+
+Abra essa pasta no VS Code (`File > Open Folder...`), e abra o terminal
+integrado (`Terminal > New Terminal`, ou o atalho **Ctrl + \``**).
+
+### 3. Instalar as dependências do projeto
+
+Dentro do terminal, na pasta do projeto, rode:
+```powershell
 npm install
+```
+Isso baixa todas as bibliotecas que o projeto usa (pode demorar um pouco
+na primeira vez).
 
-# 2. Configurar variáveis de ambiente
+### 4. Criar o arquivo de configuração (.env)
+
+Rode:
+```powershell
 cp .env.example .env
-# edite o .env com suas chaves reais
+```
 
-# 3. Criar as tabelas no banco
+Abra o arquivo `.env` que acabou de ser criado (aparece na barra lateral
+do VS Code) e preencha cada chave. **Cada uma precisa ser criada na conta
+de quem for rodar o projeto** (são gratuitas, mas pessoais):
+
+| Variável | Onde conseguir | Custo |
+|---|---|---|
+| `DATABASE_URL` | Criar um banco em [neon.tech](https://neon.tech) (conta grátis) e copiar a "Connection String" | Grátis |
+| `VOYAGE_API_KEY` | Criar conta em [voyageai.com](https://www.voyageai.com), gerar uma API Key | Grátis |
+| `GEMINI_API_KEY` | Criar em [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Grátis |
+
+Não precisa mexer nas outras variáveis do `.env` por enquanto (Twilio,
+Meta, etc) — essas fazem parte da integração com WhatsApp, que ainda está
+em andamento.
+
+### 5. Criar as tabelas do banco de dados
+
+```powershell
 npm run migrate
+```
+Deve aparecer `[db] schema verificado/criado com sucesso.` e `Migração
+concluída.` sem nenhum erro.
 
-# 4. Popular a base de conhecimento com os dados de exemplo (perfumaria)
+### 6. Popular a base de conhecimento
+
+```powershell
 npm run seed
+```
+Isso cadastra os dados de exemplo da perfumaria (ou os dados reais, se
+já tiverem sido editados em `src/seed.js`).
 
-# 5. Iniciar o servidor
-npm run dev
+### 7. Testar se está tudo funcionando
+
+```powershell
+node -e "import('./src/rag.js').then(m => m.handleIncomingMessage('teste-999', 'Qual o preço do Essência Noir?').then(r => console.log(r.replyText)))"
 ```
 
-O servidor sobe em `http://localhost:3000`. O endpoint do webhook é:
-`POST http://localhost:3000/webhook/whatsapp`
+Se aparecer uma resposta com o preço do perfume, está tudo funcionando
+corretamente. Se der erro, confira se todas as chaves no `.env` foram
+preenchidas corretamente (sem espaços extras, sem aspas ao redor do
+valor).
 
-## Usando Twilio em vez da Meta (opcional, mais rápido pra testar)
+### Problemas comuns
 
-Se quiser testar em minutos sem passar pela verificação da Meta, ative o
-Twilio Sandbox:
+- **Erro de "password authentication failed"** → a `DATABASE_URL` está
+  errada ou incompleta no `.env`.
+- **Erro "Gemini API falhou (404)"** → o nome do modelo em `GEMINI_MODEL`
+  pode estar desatualizado; confira o valor atual em
+  [ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models).
+- **Caracteres estranhos tipo `Ã§Ã£`** → problema de codificação ao
+  editar o `.env` ou os arquivos `.js`. Edite pelo VS Code diretamente
+  (não copie/cole por comandos de terminal que reescrevem o arquivo).
+- **`cp` não reconhecido no terminal** → normal em alguns terminais do
+  Windows; use `Copy-Item .env.example .env` no PowerShell como
+  alternativa.
 
-1. No `.env`, mude `WHATSAPP_PROVIDER=twilio` e preencha as chaves `TWILIO_*`.
-2. Rode `npm run dev`.
-3. Exponha o servidor: `npx localtunnel --port 3000` (ou ngrok).
-4. No console do Twilio, em **WhatsApp Sandbox Settings → "When a message
-   comes in"**, cole a URL pública + `/webhook/whatsapp-twilio`.
-5. No WhatsApp do seu celular, mande a palavra de ativação do sandbox
-   (tipo `join palavra-chave`) pro número do sandbox.
+---
 
-⚠️ Lembre-se: isso é só pra testes rápidos. Em produção, o Twilio cobra taxa
-por mensagem em cima da tarifa da Meta — veja a seção acima sobre por que a
-Meta Cloud API direta é a opção mais econômica pra rodar de verdade.
+## Próximos passos
 
-## Testando sem WhatsApp (mais rápido para depurar)
-
-Você pode testar a lógica do RAG isolada, sem Twilio, chamando diretamente:
-
-```js
-import { handleIncomingMessage } from "./src/rag.js";
-const { replyText } = await handleIncomingMessage("teste-123", "Qual o preço do Essência Noir?");
-console.log(replyText);
-```
-
-## Endpoint de métricas (para a apresentação)
-
-`GET /metrics` retorna:
-```json
-{
-  "total_conversas": 12,
-  "total_escalacoes": 2,
-  "base_conhecimento_por_categoria": [
-    { "category": "produto", "total": 2 },
-    { "category": "faq", "total": 2 }
-  ]
-}
-```
-Dá pra plugar isso num dashboard simples ou até mostrar via `curl`/Postman
-durante a apresentação — é um argumento forte de venda mostrar "quantas
-conversas o agente já resolveu sozinho".
-
-## Roadmap sugerido (pós-demo, para produção)
-
-- [ ] Migrar de Twilio Sandbox → Meta WhatsApp Business Cloud API (produção)
-- [ ] Multi-tenant real (reaproveitar o padrão `tenant_id` do RotaFlow) caso
-      queira vender para várias lojas
-- [ ] Painel web simples para o cliente final editar a base de conhecimento
-      sem precisar mexer em código
-- [ ] Fila (ex: BullMQ) se o volume de mensagens crescer
-- [ ] Rate limiting e autenticação no `/metrics` antes de expor publicamente
-- [ ] Envio de imagens de produtos (Twilio suporta mídia nas mensagens)
-- [ ] Handoff real para atendente humano (ex: notificação no Slack/e-mail
-      quando `escalated: true`)
-
-## Segurança — antes de apresentar/produção
-
-- Nunca commitar o `.env` (já está coberto por um `.gitignore` — confirme antes
-  de subir pro GitHub)
-- Validar assinatura das requisições do Twilio (`X-Twilio-Signature`) em produção
-- Sanitizar entrada do usuário antes de logar (evitar vazar dados sensíveis)
+- Finalizar a conexão com um canal de WhatsApp (avaliando as opções
+  disponíveis)
+- Trocar os dados de exemplo pelos dados reais do cliente-alvo
+- Preparar a demonstração comercial
