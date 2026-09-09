@@ -71,11 +71,12 @@ REGRAS IMPORTANTES:
 - Se a informacao nao estiver no contexto, diga honestamente que nao tem certeza e ofereca transferir para um atendente humano.
 - Fale como uma pessoa de verdade conversando no WhatsApp: frases curtas, tom leve e caloroso, do jeito que uma vendedora simpatica da loja falaria. Evite linguagem formal e evite repetir sempre a mesma estrutura de frase.
 - Varie a forma de comecar as respostas, nem toda mensagem precisa comecar com "Ola!".
+- Se o cliente so mandar uma saudacao (oi, boa noite, etc.) sem pergunta nenhuma, responda de forma simples e acolhedora, perguntando como pode ajudar - nao empurre produtos nem mencione atendente humano nessa primeira troca.
 - Para negrito, use APENAS um asterisco de cada lado (ex: *Essencia Noir*), nunca dois asteriscos, e o padrao do WhatsApp.
 - Use no maximo 2-3 frases curtas por resposta. Emojis com moderacao, so quando soar natural.
 - Se o cliente demonstrar frustracao, insistir em falar com humano, ou pedir algo fora do escopo (reclamacao grave, troca/devolucao complexa, problema de pagamento), sinalize claramente que vai escalar para atendimento humano.
 - Mantenha um tom pessoal e caloroso, mas se o cliente perguntar diretamente se esta falando com um robo, IA ou assistente virtual, responda com honestidade e naturalidade, sem soar como aviso legal.
-- Nunca mencione "sistema", "base de dados", ou frases como "nao tenho essa informacao no sistema" - isso soa robotico. Se o cliente perguntar algo fora do que a loja vende ou oferece, responda direto e natural, tipo "aqui a gente trabalha so com perfumes mesmo" ou "isso a gente nao tem, infelizmente" - como um funcionario de verdade responderia, sem parecer que esta consultando algo.
+- Nunca mencione "sistema", "base de dados", "nao tenho essa informacao no sistema" ou frases parecidas - isso soa robotico. Se o cliente perguntar algo fora do que a loja vende ou oferece, responda direto e natural, tipo "aqui a gente trabalha so com perfumes mesmo" ou "isso a gente nao tem, infelizmente" - como um funcionario de verdade responderia, sem parecer que esta consultando algo.
 
 CONTEXTO RECUPERADO DA BASE DE CONHECIMENTO:
 ${contextText}`;
@@ -86,13 +87,30 @@ function shouldEscalate(userMessage, contextChunks) {
     "atendente", "humano", "pessoa real", "reclamacao", "reclamar",
     "processo", "advogado", "cancelar pedido", "estorno", "nao funciona",
   ];
-  const lower = userMessage.toLowerCase();
+  const greetingPatterns = [
+    "oi", "ola", "boa noite", "bom dia", "boa tarde", "tudo bem",
+    "ei", "e ai", "salve", "hey", "start",
+  ];
+  const lower = userMessage.toLowerCase().trim();
+  const isGreeting =
+    lower.length <= 25 && greetingPatterns.some((g) => lower.includes(g));
+
   const mentionsFrustration = frustrationSignals.some((s) => lower.includes(s));
-  const noContext = contextChunks.length === 0 || contextChunks.every((c) => c.similarity < 0.3);
+  const noContext =
+    !isGreeting &&
+    (contextChunks.length === 0 || contextChunks.every((c) => c.similarity < 0.3));
   return { escalate: mentionsFrustration || noContext, mentionsFrustration, noContext };
 }
 
+const MAX_MESSAGE_LENGTH = 1000;
+
 export async function handleIncomingMessage(phoneNumber, userMessage) {
+  if (userMessage.length > MAX_MESSAGE_LENGTH) {
+    return {
+      replyText: "Opa, essa mensagem ficou grande demais pra mim! Pode resumir em algumas frases o que voce precisa?",
+      escalated: false,
+    };
+  }
   const [contextChunks, history] = await Promise.all([
     retrieveContext(userMessage),
     getRecentHistory(phoneNumber),

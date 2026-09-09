@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "whatsapp-rag-agent",
   "version": "0.1.0",
   "description": "Agente RAG de atendimento ao cliente 24/7 via WhatsApp (MVP - ELEVEN)",
@@ -7,16 +7,23 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "telegram": "node src/telegram-bot.js",
+    "baileys": "node src/baileys-bot.js",
     "seed": "node src/seed.js",
     "migrate": "node src/migrate.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
-    "voyageai": "^0.0.3-1",
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.24",
+    "dotenv": "^16.4.5",
     "express": "^4.21.1",
+    "node-telegram-bot-api": "^0.66.0",
     "pg": "^8.13.1",
     "pgvector": "^0.2.0",
+    "qrcode-terminal": "^0.12.0",
     "twilio": "^5.4.0",
-    "dotenv": "^16.4.5"
+    "voyageai": "^0.0.3-1"
   }
 }
+
