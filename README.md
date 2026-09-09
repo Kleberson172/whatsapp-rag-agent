@@ -287,3 +287,10 @@ O agente foi submetido a uma bateria de testes de seguranca antes da demo comerc
 ### Pendencias conhecidas (nao implementadas ainda)
 - **Validacao de assinatura do Twilio no webhook**: hoje, qualquer requisicao POST para a URL do webhook e processada, mesmo que nao venha realmente do Twilio. Para producao real, e necessario validar o cabecalho X-Twilio-Signature (ver [documentacao oficial](https://www.twilio.com/docs/usage/webhooks/webhooks-security)) antes de confiar no conteudo da requisicao.
 - **Rate limiting por numero de telefone**: nao ha limite de quantas mensagens um mesmo numero pode mandar por minuto/hora, o que poderia ser explorado para gerar custos de API.
+
+### Correcao critica: modelo Gemini instavel
+Durante os testes, o modelo gemini-3.6-flash (sugerido automaticamente pela API numa correcao anterior) se mostrou **instavel e com cota gratuita muito restrita** (apenas 20 requisicoes/dia). Em pelo menos um caso, ele vazou fragmentos das instrucoes internas do system prompt na resposta enviada ao cliente - um bug serio de seguranca e qualidade.
+
+**Corrigido**: trocado para gemini-2.5-flash, que tem cota gratuita de aproximadamente 1.500 requisicoes/dia e se mostrou estavel em todos os testes seguintes, sem vazamento de instrucoes.
+
+**Licao aprendida**: sempre verificar a cota de rate-limit e a maturidade/estabilidade de um modelo antes de usa-lo em producao, mesmo que a propria API sugira ele como "substituto recomendado".
