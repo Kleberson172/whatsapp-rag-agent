@@ -1,52 +1,82 @@
 # Agente RAG de Atendimento — Perfumaria Essência (ELEVEN)
 
-Status atual: **núcleo do agente 100% funcional e testado**. A integração
-com o canal WhatsApp está em andamento (ver seção "Próximos passos").
+Status atual: **agente completo e em operação real via WhatsApp**, incluindo
+atendimento automático (RAG), handoff para atendimento humano, e gestão de
+processo em produção (auto-restart, avisos de desligamento).
 
-Este documento descreve como o projeto está estruturado até agora, como
-foi montado, e como testar o que já funciona.
+Este documento descreve como o projeto está estruturado, como foi montado,
+e como operar/testar o que já funciona.
 
 ---
 
 ## O que já está funcionando
 
+- ✅ Canal WhatsApp real via Baileys (multi-dispositivo, sem custo por mensagem)
 - ✅ Banco de dados com busca vetorial (Neon Postgres + pgvector)
 - ✅ Geração de embeddings da base de conhecimento (Voyage AI)
-- ✅ Geração de respostas em linguagem natural (Google Gemini)
+- ✅ Geração de respostas em linguagem natural via **Groq** (`openai/gpt-oss-20b`),
+  com suporte alternativo a Gemini/Anthropic
 - ✅ Busca contextual (RAG): o agente só responde com base no que está
   cadastrado na base de conhecimento, sem inventar informação
 - ✅ Memória de conversa por número de telefone (contexto entre mensagens)
-- ✅ Lógica de escalação para atendente humano (por palavra-chave ou baixa
-  confiança na resposta)
+- ✅ Resposta automática **no mesmo idioma** que o cliente escrever
+  (português, inglês, francês, etc.)
+- ✅ **Handoff completo para atendimento humano**: escalação, aviso ao
+  cliente, notificação ao staff com histórico, resposta do staff por
+  citação da notificação, reativação do bot via `/bot`, e cancelamento
+  automático se o próprio cliente disser que não precisa mais
+- ✅ Persistência do handoff no Postgres (sobrevive a reinícios do bot)
+- ✅ Correção do bug de entrega silenciosa para contactos `@lid`
+- ✅ Filtro de mensagens antigas (evita respostas "atrasadas" após reconexão)
+- ✅ Gestão de processo em produção via **pm2**: auto-restart em caso de
+  falha, aviso ao staff no desligamento controlado, aviso automático ao
+  staff após reconexão de internet, scripts `.bat` para iniciar/parar sem
+  usar terminal
 - ✅ Tom de voz humanizado e ajustado para soar natural no WhatsApp
-- ✅ Testado via terminal com múltiplos cenários (preço, promoção, política
-  de troca, pergunta fora do escopo, pedido de atendente humano)
+- ✅ Testado extensivamente em cenários reais (preço, promoção, escalação,
+  cancelamento, mensagens em outros idiomas, quedas de conexão)
 
-## O que ainda falta
+## O que ainda falta / limitações conhecidas
 
-- 🔧 Conectar o agente a um canal real de WhatsApp (em andamento)
+- 🔧 Detecção de intenção (escalação, negação, cancelamento) é baseada em
+  palavras-chave — funciona bem nos casos testados, mas não generaliza
+  para frases totalmente novas
+- 🔧 Sem testes automatizados (toda validação até agora foi manual)
+- 🔧 Número WhatsApp usado é uma conta pessoal via Baileys (não oficial) —
+  ver seção "Riscos conhecidos" abaixo
+- 🔧 Sem monitorização externa para detectar quedas de internet/PC *durante*
+  a falha (só é possível avisar o staff *depois* de reconectar)
 
 ---
 
 ## Arquitetura
 
 ```
-Pergunta do cliente (texto)
-        │
-        ▼
-Busca vetorial na base de conhecimento (Neon + pgvector)
-        │  encontra os trechos mais relevantes (produtos, políticas, FAQ...)
-        ▼
-Monta o prompt: instruções + contexto encontrado + histórico da conversa
-        │
-        ▼
-Google Gemini gera a resposta em linguagem natural
-        │
-        ▼
-Regras de negócio verificam se precisa escalar para humano
-        │
-        ▼
-Resposta final + registro da conversa no banco
+Cliente (WhatsApp)
+     │  manda mensagem
+     ▼
+Bot (baileys-bot.js) — resolve @lid, filtra mensagens antigas
+     │
+     ▼
+rag.js — verifica se a conversa esta pausada; se nao, busca contexto
+     │  (embeddings/pgvector) e decide se precisa escalar
+     ▼
+   ┌─────────────┴─────────────┐
+   │ Sem escalar               │ Escala
+   ▼                           ▼
+Groq gera resposta        Pausa a conversa (Postgres),
+   │                       avisa o cliente, notifica o
+   ▼                       staff (com historico)
+Cliente recebe resposta         │
+                                 ▼
+                          Staff cita a notificacao e
+                          responde (ou manda /bot pra
+                          reativar o bot)
+                                 │
+                                 ▼
+                          Bot repassa a resposta ao
+                          cliente certo (via o ID da
+                          notificacao citada)
 ```
 
 ## Estrutura do projeto
@@ -54,83 +84,142 @@ Resposta final + registro da conversa no banco
 ```
 whatsapp-rag-agent/
 ├── src/
-│   ├── db.js            → conexão com Postgres + criação das tabelas
-│   ├── embeddings.js     → geração de embeddings via Voyage AI
-│   ├── llm.js            → geração de respostas (Gemini por padrão)
-│   ├── rag.js            → núcleo do agente: busca + prompt + escalação
-│   ├── seed.js           → popula a base de conhecimento (dados de exemplo)
-│   ├── migrate.js        → cria as tabelas no banco (roda separado)
-│   └── index.js          → servidor Express (usado na integração WhatsApp)
-├── .env                  → chaves de API e configurações (não commitar)
-├── .env.example          → modelo do .env
+│   ├── db.js                → conexão com Postgres + criação das tabelas
+│   ├── embeddings.js         → geração de embeddings via Voyage AI
+│   ├── llm.js                → geração de respostas (Groq por padrão;
+│   │                            Gemini e Anthropic disponíveis via
+│   │                            LLM_PROVIDER no .env)
+│   ├── rag.js                → núcleo do agente: busca + prompt + escalação
+│   │                            + cancelamento pelo cliente
+│   ├── baileys-bot.js        → ponte com o WhatsApp (Baileys): recebe/envia
+│   │                            mensagens, handoff por citação, avisos de
+│   │                            desligamento/reconexão
+│   ├── seed.js                → popula a base de conhecimento (dados de exemplo)
+│   ├── migrate.js             → cria as tabelas no banco (roda separado)
+│   └── index.js                → servidor Express (não usado no fluxo
+│                                  principal, que roda via baileys-bot.js)
+├── create-staff-notifications.sql → cria a tabela staff_notifications
+├── ecosystem.config.cjs      → configuração do pm2 (produção)
+├── iniciar-bot.bat            → duplo clique pra ligar o bot (via pm2)
+├── parar-bot.bat               → duplo clique pra desligar o bot
+├── status-bot.bat              → duplo clique pra ver se está online
+├── baileys-auth/               → sessão autenticada do WhatsApp (não commitar)
+├── logs/                       → logs do pm2 (não commitar)
+├── .env                        → chaves de API e configurações (não commitar)
+├── .env.example                 → modelo do .env
 └── package.json
 ```
 
 ## Banco de dados (tabelas)
 
 - **`knowledge_chunks`** — a base de conhecimento em si. Cada linha é um
-  "pedaço" de informação (um produto, uma política, uma pergunta de FAQ)
-  com seu respectivo embedding (vetor) pra busca por similaridade.
+  "pedaço" de informação (produto, política, FAQ) com seu embedding
+  (vetor) pra busca por similaridade.
 - **`conversations`** — histórico de mensagens por número de telefone,
-  usado como memória de curto prazo (últimas 8 mensagens).
+  usado como memória de curto prazo.
+- **`conversation_state`** — se a conversa de um número está pausada
+  (aguardando atendimento humano) e por quê.
 - **`escalations`** — registro de quando e por que uma conversa foi
   escalada para atendimento humano.
+- **`staff_notifications`** — relação entre cada notificação enviada ao
+  staff e o cliente correspondente. É o que permite ao staff responder
+  citando a notificação e o bot saber automaticamente pra quem repassar.
+  Sobrevive a reinícios do bot (ao contrário de guardar isso só em memória).
 
 ## Como a base de conhecimento é alimentada
 
-Hoje, o arquivo `src/seed.js` contém os dados de exemplo (fictícios) de
-uma perfumaria: produtos com preço, uma promoção, política de troca,
-formas de pagamento, horário de funcionamento e dicas de recomendação.
+O arquivo `src/seed.js` contém os dados (produtos com preço, promoções,
+política de troca, formas de pagamento, horário de funcionamento). Cada
+item tem uma `category`, `title` e `content`. Ao rodar `npm run seed`,
+cada item é convertido em embedding pela Voyage AI e salvo no banco.
 
-Cada item tem uma `category` (`produto`, `politica`, `faq`, `promocao`),
-um `title` e um `content`. Ao rodar `npm run seed`, cada item é convertido
-em um embedding (vetor numérico) pela Voyage AI e salvo no banco.
-
-**Para usar com dados reais de um cliente**: basta editar o array
-`knowledgeBase` dentro de `src/seed.js` com as informações reais (produtos,
-preços, políticas da empresa) e rodar `npm run seed` de novo. Não precisa
-mexer em nenhum outro arquivo do projeto.
+**Para usar com dados reais**: edite o array `knowledgeBase` em
+`src/seed.js` e rode `npm run seed` de novo.
 
 ## Geração de respostas (LLM)
 
-Por padrão, o agente usa o **Google Gemini** (`gemini-3.6-flash`), que é
-gratuito e não pede cartão de crédito. Isso é controlado pela variável
-`LLM_PROVIDER=gemini` no `.env`.
+Por padrão, o agente usa a **Groq** (`openai/gpt-oss-20b`), que é gratuita,
+rápida, e com cota diária bem mais generosa que a alternativa testada
+anteriormente. Controlado por `LLM_PROVIDER=groq` no `.env`.
 
-O arquivo `src/llm.js` também tem suporte pronto para usar o **Claude
-(Anthropic)** no lugar do Gemini, caso no futuro haja créditos disponíveis
-(ex: programa de estudante) — basta mudar `LLM_PROVIDER=anthropic` no `.env`.
+Modelos alternativos na Groq (trocar via `GROQ_MODEL` no `.env`):
+- `openai/gpt-oss-20b` (padrão — rápido, ótimo para respostas curtas)
+- `openai/gpt-oss-120b` (mais forte, mais lento — para respostas mais elaboradas)
+
+O `src/llm.js` também suporta `LLM_PROVIDER=gemini` ou `LLM_PROVIDER=anthropic`
+como alternativas, caso necessário no futuro.
+
+## Fluxo de atendimento humano (handoff)
+
+Quando o agente detecta que precisa de um humano (pedido explícito,
+frustração, ou falta de contexto na base de conhecimento):
+
+1. A conversa do cliente é **pausada** — o bot para de responder
+   automaticamente pra esse número.
+2. O cliente recebe um aviso: *"Vou te conectar com um dos nossos
+   atendentes. Só um momento!"*
+3. O staff (número configurado em `STAFF_WHATSAPP_NUMBER`) recebe uma
+   notificação com o histórico recente da conversa.
+4. **O staff responde citando essa notificação** (segurar a mensagem →
+   Responder no WhatsApp) — nunca soltando uma mensagem nova sem citar.
+   O bot identifica automaticamente o cliente pelo ID da mensagem citada.
+5. Pra devolver a conversa ao bot, o staff cita a **mesma notificação** de
+   novo e escreve, numa mensagem separada, só `/bot`.
+6. Se o cliente disser, enquanto espera, algo como *"não é necessário"* ou
+   *"deixa pra lá"*, o bot detecta isso e retoma sozinho, sem esperar o
+   staff — e avisa o staff que pode ignorar aquela notificação.
+
+**Visibilidade para o staff**: por padrão, o staff só recebe mensagens
+ligadas a uma escalação (não vê as conversas normais que o bot resolve
+sozinho). Para o staff ver **todas** as trocas, mesmo sem escalar, define
+`MIRROR_ALL_TO_STAFF=true` no `.env`.
 
 ## Tom de voz e regras do agente
 
-O prompt do agente (dentro de `buildSystemPrompt()` em `src/rag.js`) foi
-ajustado, depois de vários testes, para:
+O prompt do agente (`buildSystemPrompt()` em `src/rag.js`) foi ajustado para:
 
-- Responder de forma curta, calorosa e natural, como um funcionário de
-  verdade da loja falaria no WhatsApp — não como um script robótico
-- Usar negrito no formato do WhatsApp (`*texto*`, um asterisco), não
-  Markdown tradicional (`**texto**`)
-- Nunca mencionar "sistema" ou "base de dados" ao responder — se não sabe
-  algo, responde direto e natural ("aqui a gente só trabalha com X")
+- Responder no **mesmo idioma** que o cliente usar
+- Ser curto, caloroso e natural, como um funcionário de verdade da loja
+- Usar negrito no formato do WhatsApp (`*texto*`, um asterisco)
+- Nunca mencionar "sistema" ou "base de dados"
 - Nunca inventar preços, políticas ou informações que não estejam na base
-- Escalar para atendente humano quando: o cliente pede explicitamente, usa
-  palavras de frustração, ou quando a base de conhecimento não tem
-  informação suficiente (confiança da busca abaixo de um limite)
-- Ser honesto (sem soar como aviso legal) se o cliente perguntar
-  diretamente se está falando com um robô ou assistente virtual
+- Escalar quando: pedido explícito, frustração, ou contexto insuficiente
+  — mas **não** escalar em saudações, agradecimentos, ou negações claras
+  ("não quero atendente", "não é necessário", com ou sem acento)
+- Ser honesto se perguntado diretamente se é um robô/IA
+
+## Operação em produção (pm2)
+
+O bot roda gerido pelo **pm2** (configurado em `ecosystem.config.cjs`),
+que garante:
+- Reinício automático se o processo cair (crash, erro não tratado)
+- Aviso ao staff no desligamento controlado (`pm2 stop`) e após reconexão
+  de internet (se ficou offline por mais de 1 minuto)
+- Sobrevivência a reinícios do PC (via `pm2-startup install`, já configurado)
+
+**Uso do dia a dia**, sem precisar de terminal:
+- `iniciar-bot.bat` — duplo clique pra ligar
+- `parar-bot.bat` — duplo clique pra desligar (avisa o staff)
+- `status-bot.bat` — duplo clique pra ver se está online
+
+**Quando usar `node src/baileys-bot.js` direto** (sem pm2): só durante
+desenvolvimento/depuração ativa, nunca em produção, e nunca ao mesmo tempo
+que o pm2 estiver a gerir o processo (os dois autenticados na mesma sessão
+WhatsApp entram em conflito e podem colocar a conta em risco de restrição).
+
+**Comandos manuais do pm2** (se precisar, fora dos `.bat`):
+```powershell
+pm2 status                    # ver se está a correr
+pm2 logs whatsapp-bot         # ver logs ao vivo
+pm2 restart whatsapp-bot      # reiniciar (depois de um patch)
+pm2 start ecosystem.config.cjs  # ligar (primeira vez ou depois de pm2 delete)
+```
 
 ## Como testar (sem WhatsApp, direto no terminal)
 
-Com o `.env` configurado e a base de conhecimento populada (`npm run seed`),
-dá pra testar o agente diretamente, simulando uma conversa:
-
 ```powershell
-node -e "import('./src/rag.js').then(m => m.handleIncomingMessage('teste-123', 'Qual o preço do Essência Noir?').then(r => console.log(r.replyText)))"
+node -e "import('./src/rag.js').then(m => m.handleIncomingMessage('teste-123', 'Qual o preco do Essencia Noir?').then(r => console.log(r.replyText)))"
 ```
-
-Trocando o texto da pergunta e mantendo o mesmo identificador (`teste-123`)
-entre chamadas, dá pra testar também a memória de conversa (perguntas de
-seguimento tipo "e esse tem desconto?").
 
 ### Cenários já testados e validados
 
@@ -138,8 +227,14 @@ seguimento tipo "e esse tem desconto?").
 |---|---|
 | Pergunta de preço com promoção ativa | Respondeu certo e calculou o desconto |
 | Política de troca | Respondeu completo, sem escalar à toa |
-| Pergunta fora da base (ex: produto que não vendem) | Foi honesto, sem inventar, sugeriu alternativa |
-| Pedido explícito de atendente humano | Escalou corretamente |
+| Pergunta fora da base | Foi honesto, sem inventar, sugeriu alternativa |
+| Pedido explícito de atendente humano | Escalou corretamente, staff notificado |
+| Negação ("não quero atendente") | Não escalou, respondeu normalmente |
+| Cancelamento durante espera | Bot retomou sozinho, staff avisado |
+| Mensagem em inglês/francês | Respondeu no mesmo idioma |
+| Resposta do staff via citação | Repassada corretamente ao cliente certo |
+| Queda e reconexão de internet | Staff avisado automaticamente ao reconectar |
+| `pm2 stop` (desligamento controlado) | Staff avisado antes do processo parar |
 
 ## Setup local (resumo)
 
@@ -147,150 +242,102 @@ seguimento tipo "e esse tem desconto?").
 2. Copiar `.env.example` para `.env` e preencher:
    - `DATABASE_URL` (Neon Postgres)
    - `VOYAGE_API_KEY` (Voyage AI, grátis)
-   - `GEMINI_API_KEY` (Google AI Studio, grátis)
+   - `GROQ_API_KEY` (console.groq.com, grátis) + `LLM_PROVIDER=groq`
+   - `STAFF_WHATSAPP_NUMBER` (número do staff, com código do país, sem `+`)
 3. `npm run migrate` — cria as tabelas
-4. `npm run seed` — popula a base de conhecimento
-5. Testar via terminal (comando acima) ou seguir para a integração com
-   WhatsApp (próxima etapa, ainda em configuração)
-
----
-
-## Rodando pela primeira vez em outro computador
-
-Guia completo para quem nunca configurou o projeto antes (ex: um colega
-recebendo a pasta do projeto pela primeira vez).
-
-### 1. Instalar os programas necessários
-
-Antes de tocar no projeto, instale nessa ordem:
-
-- **Node.js** (versão 20 ou superior) — baixe em [nodejs.org](https://nodejs.org)
-  e instale normalmente (Next, Next, Finish). Isso já inclui o `npm`.
-  Para confirmar que instalou certo, abra o terminal e rode:
-  ```powershell
-  node -v
-  npm -v
-  ```
-  Deve mostrar um número de versão em cada um, sem erro.
-
-- **Visual Studio Code** (editor de código) — baixe em
-  [code.visualstudio.com](https://code.visualstudio.com). Não é
-  obrigatório, mas facilita muito editar arquivos e usar o terminal
-  integrado.
-
-- **Git** (opcional, só se for clonar de um repositório em vez de copiar
-  a pasta) — baixe em [git-scm.com](https://git-scm.com).
-
-### 2. Copiar o projeto
-
-Se o projeto foi enviado como uma pasta ou arquivo `.zip`, extraia essa
-pasta em qualquer lugar do computador (ex: `Área de Trabalho` ou
-`Documentos`). Se for por Git, clone o repositório normalmente.
-
-Abra essa pasta no VS Code (`File > Open Folder...`), e abra o terminal
-integrado (`Terminal > New Terminal`, ou o atalho **Ctrl + \``**).
-
-### 3. Instalar as dependências do projeto
-
-Dentro do terminal, na pasta do projeto, rode:
-```powershell
-npm install
-```
-Isso baixa todas as bibliotecas que o projeto usa (pode demorar um pouco
-na primeira vez).
-
-### 4. Criar o arquivo de configuração (.env)
-
-Rode:
-```powershell
-cp .env.example .env
-```
-
-Abra o arquivo `.env` que acabou de ser criado (aparece na barra lateral
-do VS Code) e preencha cada chave. **Cada uma precisa ser criada na conta
-de quem for rodar o projeto** (são gratuitas, mas pessoais):
-
-| Variável | Onde conseguir | Custo |
-|---|---|---|
-| `DATABASE_URL` | Criar um banco em [neon.tech](https://neon.tech) (conta grátis) e copiar a "Connection String" | Grátis |
-| `VOYAGE_API_KEY` | Criar conta em [voyageai.com](https://www.voyageai.com), gerar uma API Key | Grátis |
-| `GEMINI_API_KEY` | Criar em [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Grátis |
-
-Não precisa mexer nas outras variáveis do `.env` por enquanto (Twilio,
-Meta, etc) — essas fazem parte da integração com WhatsApp, que ainda está
-em andamento.
-
-### 5. Criar as tabelas do banco de dados
-
-```powershell
-npm run migrate
-```
-Deve aparecer `[db] schema verificado/criado com sucesso.` e `Migração
-concluída.` sem nenhum erro.
-
-### 6. Popular a base de conhecimento
-
-```powershell
-npm run seed
-```
-Isso cadastra os dados de exemplo da perfumaria (ou os dados reais, se
-já tiverem sido editados em `src/seed.js`).
-
-### 7. Testar se está tudo funcionando
-
-```powershell
-node -e "import('./src/rag.js').then(m => m.handleIncomingMessage('teste-999', 'Qual o preço do Essência Noir?').then(r => console.log(r.replyText)))"
-```
-
-Se aparecer uma resposta com o preço do perfume, está tudo funcionando
-corretamente. Se der erro, confira se todas as chaves no `.env` foram
-preenchidas corretamente (sem espaços extras, sem aspas ao redor do
-valor).
+4. Rodar o SQL de `create-staff-notifications.sql` no Postgres (uma vez)
+5. `npm run seed` — popula a base de conhecimento
+6. `node src/baileys-bot.js` — primeira conexão (escanear o QR code)
+7. Depois de confirmar que funciona, mudar para produção via pm2:
+   `pm2 start ecosystem.config.cjs && pm2 save && pm2-startup install`
+   (ou simplesmente usar `iniciar-bot.bat` dali em diante)
 
 ### Problemas comuns
 
 - **Erro de "password authentication failed"** → a `DATABASE_URL` está
   errada ou incompleta no `.env`.
-- **Erro "Gemini API falhou (404)"** → o nome do modelo em `GEMINI_MODEL`
-  pode estar desatualizado; confira o valor atual em
-  [ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models).
-- **Caracteres estranhos tipo `Ã§Ã£`** → problema de codificação ao
-  editar o `.env` ou os arquivos `.js`. Edite pelo VS Code diretamente
-  (não copie/cole por comandos de terminal que reescrevem o arquivo).
-- **`cp` não reconhecido no terminal** → normal em alguns terminais do
-  Windows; use `Copy-Item .env.example .env` no PowerShell como
-  alternativa.
+- **Erro "Groq API falhou (404)"** → o nome do modelo em `GROQ_MODEL` pode
+  ter mudado; rodar um script simples que consulta `GET
+  https://api.groq.com/openai/v1/models` com a tua chave pra confirmar
+  os nomes atuais disponíveis pra tua conta.
+- **Mensagens não chegam ao cliente / "ack 463"** → confirmar que está a
+  usar `@whiskeysockets/baileys@7.x` ou superior (necessário pro suporte
+  a `@lid`), e que a resolução de `@lid` em `safeSendMessage` está intacta.
+- **`cp` não reconhecido no terminal** → usar `Copy-Item .env.example .env`
+  no PowerShell.
+- **Dois processos a correr ao mesmo tempo** → nunca correr
+  `node src/baileys-bot.js` manualmente enquanto o pm2 também gere o
+  `whatsapp-bot`. Verificar com `Get-Process node` e `pm2 status`.
 
 ---
 
-## Próximos passos
-
-- Finalizar a conexão com um canal de WhatsApp (avaliando as opções
-  disponíveis)
-- Trocar os dados de exemplo pelos dados reais do cliente-alvo
-- Preparar a demonstração comercial
-
-## Testes de seguranca realizados
-
-O agente foi submetido a uma bateria de testes de seguranca antes da demo comercial:
+## Testes de segurança realizados
 
 ### Prompt injection e jailbreak
-- Tentativa de "ignorar instrucoes anteriores" e revelar o system prompt: **bloqueado**, o agente nao vaza instrucoes internas
-- Tentativa de se passar por desenvolvedor/admin do sistema: **bloqueado**, manteve o personagem
-- Tentativa de forcar um preco ou desconto falso (engenharia social): **bloqueado**, sempre confirma com o preco real da base de conhecimento
-- Tentativa de acessar conversas de outros clientes: **bloqueado**, cada conversa e isolada por numero de telefone no banco de dados
+- Tentativa de "ignorar instruções anteriores": **bloqueado**
+- Tentativa de se passar por desenvolvedor/admin: **bloqueado**
+- Tentativa de forçar preço/desconto falso: **bloqueado**, sempre confirma
+  com o preço real da base de conhecimento
+- Tentativa de acessar conversas de outros clientes: **bloqueado**, cada
+  conversa é isolada por número de telefone
 
-### Validacao de entrada
-- Mensagens extremamente longas (magnitude de milhares de caracteres): **corrigido** - agora ha um limite de 1000 caracteres por mensagem, que recusa educadamente antes de gastar tokens de API (protege contra custos inesperados)
-- Tentativa de SQL Injection (ex: '; DROP TABLE knowledge_chunks; --): **bloqueado nativamente**, pois todas as consultas ao banco usam parametros preparados ($1, $2, etc.) em vez de concatenar texto diretamente no SQL
+### Validação de entrada
+- Mensagens extremamente longas: limite de 1000 caracteres, recusa educada
+- SQL Injection: bloqueado nativamente (queries parametrizadas, `$1`, `$2`, etc.)
 
-### Pendencias conhecidas (nao implementadas ainda)
-- **Validacao de assinatura do Twilio no webhook**: hoje, qualquer requisicao POST para a URL do webhook e processada, mesmo que nao venha realmente do Twilio. Para producao real, e necessario validar o cabecalho X-Twilio-Signature (ver [documentacao oficial](https://www.twilio.com/docs/usage/webhooks/webhooks-security)) antes de confiar no conteudo da requisicao.
-- **Rate limiting por numero de telefone**: nao ha limite de quantas mensagens um mesmo numero pode mandar por minuto/hora, o que poderia ser explorado para gerar custos de API.
+### Correção crítica: modelo instável descoberto em produção
+O `gemini-3.6-flash` (sugerido automaticamente numa correção anterior) se
+mostrou instável, com cota gratuita muito restrita (20 req/dia), e em pelo
+menos um caso vazou fragmentos do system prompt na resposta ao cliente —
+um bug sério de segurança. Corrigido primeiro trocando para
+`gemini-2.5-flash`, e posteriormente migrado de vez para a **Groq**, que
+não tem esse histórico de instabilidade e oferece cota muito mais folgada.
 
-### Correcao critica: modelo Gemini instavel
-Durante os testes, o modelo gemini-3.6-flash (sugerido automaticamente pela API numa correcao anterior) se mostrou **instavel e com cota gratuita muito restrita** (apenas 20 requisicoes/dia). Em pelo menos um caso, ele vazou fragmentos das instrucoes internas do system prompt na resposta enviada ao cliente - um bug serio de seguranca e qualidade.
+### Bug de entrega silenciosa (`ack 463`)
+Mensagens para contactos identificados como `@lid` (em vez do número de
+telefone) eram "enviadas" sem erro nos logs, mas nunca chegavam ao
+destinatário. Corrigido resolvendo o `@lid` para o JID real via
+`sock.signalRepository.lidMapping` antes de cada envio.
 
-**Corrigido**: trocado para gemini-2.5-flash, que tem cota gratuita de aproximadamente 1.500 requisicoes/dia e se mostrou estavel em todos os testes seguintes, sem vazamento de instrucoes.
+### Risco de conflito de sessão (duas instâncias simultâneas)
+Rodar `node src/baileys-bot.js` manualmente enquanto o pm2 também gere o
+processo causa um loop de reconexões conflitantes entre as duas instâncias
+(cada uma "rouba" a sessão da outra), o que pode ser interpretado pelo
+WhatsApp como comportamento suspeito de automação. **Regra**: nunca correr
+os dois ao mesmo tempo.
 
-**Licao aprendida**: sempre verificar a cota de rate-limit e a maturidade/estabilidade de um modelo antes de usa-lo em producao, mesmo que a propria API sugira ele como "substituto recomendado".
+### Pendências conhecidas (não implementadas ainda)
+- **Rate limiting por número de telefone**: sem limite de quantas mensagens
+  um mesmo número pode mandar por minuto/hora.
+- **Detecção de intenção por keyword**: escalação/negação/cancelamento
+  usam listas de palavras-chave, não um classificador real — pode falhar
+  em frases muito diferentes das testadas.
+- **Monitorização externa de disponibilidade**: hoje só é possível avisar
+  o staff de uma queda de internet/PC *depois* de reconectar, nunca
+  *durante* a falha (limitação física: nada pode ser enviado sem conexão).
+  Para cobrir isso, seria necessário um serviço externo (ex: Healthchecks.io)
+  monitorando o bot de fora.
+
+---
+
+## Riscos conhecidos
+
+- **Número WhatsApp não-oficial (via Baileys)**: sujeito a restrições ou
+  banimento pelo WhatsApp se detectado como automação (já aconteceu uma
+  vez durante os testes — restrição temporária seguida de remoção forçada
+  do dispositivo). Para produção séria e de longo prazo, considerar migrar
+  para a Meta WhatsApp Cloud API oficial.
+- **Dependência de um PC pessoal sempre ligado**: o bot não roda num
+  servidor na nuvem — se o PC ficar desligado ou sem internet, o
+  atendimento para completamente até a conexão voltar. Para produção real,
+  considerar hospedar num VPS (DigitalOcean, Hetzner, etc.), sempre online.
+
+## Próximos passos
+
+- Avaliar migração para a Meta WhatsApp Cloud API oficial (elimina o risco
+  de restrição/banimento)
+- Considerar hospedagem em servidor na nuvem (elimina a dependência do PC local)
+- Trocar os dados de exemplo pelos dados reais do cliente-alvo
+- Adicionar testes automatizados para os cenários já validados manualmente
+- Avaliar monitorização externa (ex: Healthchecks.io) para detectar quedas
+  de conectividade em tempo real

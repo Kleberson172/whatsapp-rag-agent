@@ -1,4 +1,4 @@
-import pg from "pg";
+﻿import pg from "pg";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -10,13 +10,13 @@ export const pool = new Pool({
 });
 
 /**
- * Cria as tabelas necessárias caso não existam.
- * Roda automaticamente no start (idempotente) e também via `npm run migrate`.
+ * Cria as tabelas necessÃ¡rias caso nÃ£o existam.
+ * Roda automaticamente no start (idempotente) e tambÃ©m via `npm run migrate`.
  */
 export async function ensureSchema() {
   await pool.query(`CREATE EXTENSION IF NOT EXISTS vector;`);
 
-  // Base de conhecimento (produtos, políticas, FAQ, promoções...)
+  // Base de conhecimento (produtos, polÃ­ticas, FAQ, promoÃ§Ãµes...)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS knowledge_chunks (
       id SERIAL PRIMARY KEY,
@@ -35,7 +35,7 @@ export async function ensureSchema() {
     WITH (lists = 100);
   `);
 
-  // Histórico de conversas por número de telefone (memória de curto prazo)
+  // HistÃ³rico de conversas por nÃºmero de telefone (memÃ³ria de curto prazo)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS conversations (
       id SERIAL PRIMARY KEY,
@@ -52,7 +52,7 @@ export async function ensureSchema() {
     ON conversations (tenant_id, phone_number, created_at);
   `);
 
-  // Log de conversas escaladas para humano + métricas simples
+  // Log de conversas escaladas para humano + mÃ©tricas simples
   await pool.query(`
     CREATE TABLE IF NOT EXISTS escalations (
       id SERIAL PRIMARY KEY,
@@ -63,5 +63,16 @@ export async function ensureSchema() {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS conversation_state (
+      phone_number TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL DEFAULT 'default',
+      is_paused BOOLEAN NOT NULL DEFAULT false,
+      paused_reason TEXT,
+      updated_at TIMESTAMPTZ DEFAULT now()
+    );
+  `);
+
   console.log("[db] schema verificado/criado com sucesso.");
 }
+

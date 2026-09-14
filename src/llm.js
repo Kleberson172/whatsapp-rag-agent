@@ -1,16 +1,58 @@
-﻿import dotenv from "dotenv";
+import dotenv from "dotenv";
 dotenv.config();
 
-const LLM_PROVIDER = process.env.LLM_PROVIDER || "gemini";
+const LLM_PROVIDER = process.env.LLM_PROVIDER || "groq";
 
 export async function generateReply(systemPrompt, messages) {
   if (LLM_PROVIDER === "anthropic") {
     return generateWithAnthropic(systemPrompt, messages);
   }
-  return generateWithGemini(systemPrompt, messages);
+  if (LLM_PROVIDER === "gemini") {
+    return generateWithGemini(systemPrompt, messages);
+  }
+  return generateWithGroq(systemPrompt, messages);
 }
 
-async function generateWithGemini(systemPrompt, messages) {
+async function generateWithGroq(systemPrompt, messages, retriesLeft = 2) {
+  const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+
+  // A API da Groq segue o mesmo formato da OpenAI: role "system"/"user"/"assistant".
+  const chatMessages = [
+    { role: "system", content: systemPrompt },
+    ...messages.map((m) => ({ role: m.role, content: m.content })),
+  ];
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: chatMessages,
+      max_tokens: 1024,
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    const isRetryable = res.status === 503 || res.status === 429;
+    if (isRetryable && retriesLeft > 0) {
+      const waitMs = res.status === 429 ? 5000 : 1500;
+      console.log(`[llm] Groq retornou ${res.status}, tentando novamente em ${waitMs}ms (${retriesLeft} tentativas restantes)`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return generateWithGroq(systemPrompt, messages, retriesLeft - 1);
+    }
+    throw new Error(`Groq API falhou (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
+async function generateWithGemini(systemPrompt, messages, retriesLeft = 2) {
   const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
@@ -31,6 +73,13 @@ async function generateWithGemini(systemPrompt, messages) {
 
   if (!res.ok) {
     const errText = await res.text();
+    const isRetryable = res.status === 503 || res.status === 429;
+    if (isRetryable && retriesLeft > 0) {
+      const waitMs = res.status === 429 ? 5000 : 1500;
+      console.log(`[llm] Gemini retornou ${res.status}, tentando novamente em ${waitMs}ms (${retriesLeft} tentativas restantes)`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return generateWithGemini(systemPrompt, messages, retriesLeft - 1);
+    }
     throw new Error(`Gemini API falhou (${res.status}): ${errText}`);
   }
 
@@ -55,5 +104,3 @@ async function generateWithAnthropic(systemPrompt, messages) {
     .map((block) => block.text)
     .join("\n");
 }
-
-
